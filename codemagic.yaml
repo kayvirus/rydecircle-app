@@ -1,15 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # RydeCircle Rider App — codemagic.yaml  (TESTING / DEVELOPMENT)
 #
-# Produces a debug APK you can install directly on any Android device.
-# No keystore, no signing setup required.
-#
 # Environment variable groups to create in Codemagic UI → App settings:
 #
-#   rydecircle_shared      API_BASE_URL
-#   rydecircle_paystack    PAYSTACK_PUBLIC_KEY   ← use your TEST key (pk_test_xxx)
-#
-# When you're ready for production, switch to the release workflow below.
+#   rydecircle_shared        API_BASE_URL
+#   rydecircle_flutterwave   FLUTTERWAVE_PUBLIC_KEY   ← use FLWPUBK_TEST-xxx
+#                                                       (mark as sensitive)
 # ─────────────────────────────────────────────────────────────────────────────
 
 workflows:
@@ -18,24 +14,47 @@ workflows:
   rider-android-debug:
     name: Rider App — Debug APK (Testing)
     max_build_duration: 30
-    instance_type: mac_mini_m2      # cheapest instance, no macOS needed for Android
+    instance_type: mac_mini_m2
 
     environment:
       flutter: stable
       java: 17
       groups:
         - rydecircle_shared
-        - rydecircle_paystack
+        - rydecircle_flutterwave
 
     triggering:
       events:
         - push
       branch_patterns:
-        - pattern: '*'           # trigger on every branch while testing
+        - pattern: '*'
           include: true
       cancel_previous_builds: true
 
     scripts:
+
+      - name: Set NDK version (required by flutterwave_standard)
+        script: |
+          # flutterwave_standard requires NDK >= 27.0.12077973
+          # Patch build.gradle.kts to set it before flutter pub get runs
+          GRADLE_FILE="android/app/build.gradle.kts"
+          if grep -q "ndkVersion" "$GRADLE_FILE"; then
+            sed -i 's/ndkVersion = .*/ndkVersion = "27.0.12077973"/' "$GRADLE_FILE"
+          else
+            sed -i '/android {/a\    ndkVersion = "27.0.12077973"' "$GRADLE_FILE"
+          fi
+          echo "NDK version set:"
+          grep "ndkVersion" "$GRADLE_FILE" || echo "(not found in .kts, trying .gradle)"
+          GRADLE_FILE2="android/app/build.gradle"
+          if [ -f "$GRADLE_FILE2" ]; then
+            if grep -q "ndkVersion" "$GRADLE_FILE2"; then
+              sed -i 's/ndkVersion .*/ndkVersion "27.0.12077973"/' "$GRADLE_FILE2"
+            else
+              sed -i '/android {/a\    ndkVersion "27.0.12077973"' "$GRADLE_FILE2"
+            fi
+            grep "ndkVersion" "$GRADLE_FILE2" || true
+          fi
+
       - name: flutter pub get
         script: flutter pub get
 
@@ -46,7 +65,8 @@ workflows:
         script: |
           flutter build apk --debug \
             --dart-define=API_BASE_URL="$API_BASE_URL" \
-            --dart-define=PAYSTACK_PUBLIC_KEY="$PAYSTACK_PUBLIC_KEY"
+            --dart-define=FLUTTERWAVE_PUBLIC_KEY="$FLUTTERWAVE_PUBLIC_KEY" \
+            --dart-define=FLW_TEST_MODE=true
 
     artifacts:
       - build/app/outputs/flutter-apk/app-debug.apk
@@ -61,7 +81,7 @@ workflows:
 
 
   # ── PRODUCTION — release APK + AAB, requires signing ────────────────────────
-  # Uncomment this entire workflow when you are ready to release.
+  # Uncomment when ready to release.
   #
   # rider-android-release:
   #   name: Rider App — Release (Production)
@@ -73,9 +93,9 @@ workflows:
   #     java: 17
   #     groups:
   #       - rydecircle_shared
-  #       - rydecircle_paystack
-  #       - rydecircle_rider_signing   # CM_KEYSTORE, CM_KEYSTORE_PASSWORD,
-  #                                    # CM_KEY_ALIAS, CM_KEY_PASSWORD
+  #       - rydecircle_flutterwave   # use FLWPUBK_LIVE-xxx for production
+  #       - rydecircle_rider_signing # CM_KEYSTORE, CM_KEYSTORE_PASSWORD,
+  #                                  # CM_KEY_ALIAS, CM_KEY_PASSWORD
   #
   #   triggering:
   #     events: [push, tag]
@@ -85,6 +105,15 @@ workflows:
   #     cancel_previous_builds: true
   #
   #   scripts:
+  #     - name: Set NDK version
+  #       script: |
+  #         GRADLE_FILE="android/app/build.gradle.kts"
+  #         if grep -q "ndkVersion" "$GRADLE_FILE"; then
+  #           sed -i 's/ndkVersion = .*/ndkVersion = "27.0.12077973"/' "$GRADLE_FILE"
+  #         else
+  #           sed -i '/android {/a\    ndkVersion = "27.0.12077973"' "$GRADLE_FILE"
+  #         fi
+  #
   #     - name: Set up Android signing
   #       script: |
   #         echo "$CM_KEYSTORE" | base64 --decode > android/app/keystore.jks
@@ -105,7 +134,8 @@ workflows:
   #       script: |
   #         flutter build apk --release \
   #           --dart-define=API_BASE_URL="$API_BASE_URL" \
-  #           --dart-define=PAYSTACK_PUBLIC_KEY="$PAYSTACK_PUBLIC_KEY" \
+  #           --dart-define=FLUTTERWAVE_PUBLIC_KEY="$FLUTTERWAVE_PUBLIC_KEY" \
+  #           --dart-define=FLW_TEST_MODE=false \
   #           --obfuscate \
   #           --split-debug-info=build/debug-info
   #
@@ -113,7 +143,8 @@ workflows:
   #       script: |
   #         flutter build appbundle --release \
   #           --dart-define=API_BASE_URL="$API_BASE_URL" \
-  #           --dart-define=PAYSTACK_PUBLIC_KEY="$PAYSTACK_PUBLIC_KEY" \
+  #           --dart-define=FLUTTERWAVE_PUBLIC_KEY="$FLUTTERWAVE_PUBLIC_KEY" \
+  #           --dart-define=FLW_TEST_MODE=false \
   #           --obfuscate \
   #           --split-debug-info=build/debug-info
   #

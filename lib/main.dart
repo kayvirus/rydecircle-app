@@ -36,7 +36,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:flutter_paystack/flutter_paystack.dart';
+import 'package:flutter_paystack_plus/flutter_paystack_plus.dart';
 import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
 import 'package:gap/gap.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -48,8 +48,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shimmer/shimmer.dart';
 import 'package:timeline_tile/timeline_tile.dart';
 
-// ─── Paystack plugin ─────────────────────────────────────────────────────────
-final _paystack = PaystackPlugin();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -57,10 +55,7 @@ void main() async {
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
   ));
-  // Pass --dart-define=PAYSTACK_PUBLIC_KEY=pk_live_xxx at build time
-  if (AppConfig.paystackKey.isNotEmpty) {
-    await _paystack.initialize(publicKey: AppConfig.paystackKey);
-  }
+  // Pass --dart-define=PAYSTACK_PUBLIC_KEY=pk_test_xxx at build time
   runApp(const RydeCircleApp());
 }
 
@@ -1554,36 +1549,40 @@ class _BookingPageState extends State<BookingPage> {
 
   Future<void> _pay() async {
     if (AppConfig.paystackKey.isEmpty) {
-      setState(() => _err = 'Paystack is not configured. Set PAYSTACK_PUBLIC_KEY at build time.');
+      setState(() => _err = 'Paystack key not set. Add --dart-define=PAYSTACK_PUBLIC_KEY=pk_test_xxx to your build.');
       return;
     }
     setState(() { _loading = true; _err = null; });
     final ref = _ref();
-    final charge = Charge()
-      ..amount    = _kobo
-      ..email     = widget.session.user.email
-      ..reference = ref
-      ..currency  = 'NGN'
-      ..putCustomField('trip_id', widget.trip.id)
-      ..putCustomField('seats',   '$_seats')
-      ..putCustomField('user_id', widget.session.user.id);
     try {
-      final res = await _paystack.checkout(context, charge: charge,
-          method: CheckoutMethod.selectable, fullscreen: false, logo: const _Logo(size: 32));
-      if (!mounted) return;
-      if (!res.status) {
-        setState(() { _err = res.message ?? 'Payment cancelled'; _loading = false; }); return;
-      }
-      final booking = await widget.api.createBooking(
-          tripId: widget.trip.id, seats: _seats, paymentRef: res.reference ?? ref);
-      if (!mounted) return;
-      widget.onBooked();
-      Navigator.pop(context);
-      Navigator.push(context, MaterialPageRoute(builder: (_) => BookingConfirmedPage(booking: booking)));
-    } on PaystackException catch (e) {
-      if (mounted) setState(() { _err = 'Payment error: ${e.message}'; _loading = false; });
+      await FlutterPaystackPlus.openPaystackPopup(
+        context:       context,
+        secretKey:     AppConfig.paystackKey,   // use pk_test_xxx for testing
+        customerEmail: widget.session.user.email,
+        reference:     ref,
+        amount:        _kobo.toString(),          // in kobo
+        currency:      'NGN',
+        callBackUrl:   'https://rydecircle.com/payment-complete',
+        onSuccess: () async {
+          // Payment succeeded — create booking on backend
+          try {
+            final booking = await widget.api.createBooking(
+                tripId: widget.trip.id, seats: _seats, paymentRef: ref);
+            if (!mounted) return;
+            widget.onBooked();
+            Navigator.pop(context);
+            Navigator.push(context,
+                MaterialPageRoute(builder: (_) => BookingConfirmedPage(booking: booking)));
+          } catch (e) {
+            if (mounted) setState(() => _err = 'Booking failed after payment: \$e');
+          }
+        },
+        onClosed: () {
+          if (mounted) setState(() { _err = 'Payment was cancelled'; _loading = false; });
+        },
+      );
     } catch (e) {
-      if (mounted) setState(() { _err = '$e'; _loading = false; });
+      if (mounted) setState(() => _err = '\$e');
     } finally { if (mounted) setState(() => _loading = false); }
   }
 

@@ -34,7 +34,7 @@ dependencies:
   cached_network_image: ^3.3.1
 
   # Paystack inline checkout
-  flutter_paystack: ^1.0.9
+  flutter_paystack_plus: ^3.0.0
 
   # Date formatting
   intl: ^0.19.0

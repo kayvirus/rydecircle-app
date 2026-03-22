@@ -4,13 +4,11 @@
 # Environment variable groups to create in Codemagic UI → App settings:
 #
 #   rydecircle_shared        API_BASE_URL
-#   rydecircle_flutterwave   FLUTTERWAVE_PUBLIC_KEY   ← use FLWPUBK_TEST-xxx
-#                                                       (mark as sensitive)
+#   rydecircle_flutterwave   FLUTTERWAVE_PUBLIC_KEY  (FLWPUBK_TEST-xxx)
 # ─────────────────────────────────────────────────────────────────────────────
 
 workflows:
 
-  # ── TESTING — debug APK, no signing needed ──────────────────────────────────
   rider-android-debug:
     name: Rider App — Debug APK (Testing)
     max_build_duration: 30
@@ -33,34 +31,50 @@ workflows:
 
     scripts:
 
-      - name: Set NDK version (required by flutterwave_standard)
+      # ── 1. Regenerate Android folder if Gradle setup is outdated ───────────
+      # This fixes: "Your app is using an unsupported Gradle project"
+      # Safe to run every time — only touches android/, never lib/ or pubspec
+      - name: Regenerate Android project (fix unsupported Gradle)
         script: |
-          # flutterwave_standard requires NDK >= 27.0.12077973
-          # Patch build.gradle.kts to set it before flutter pub get runs
-          GRADLE_FILE="android/app/build.gradle.kts"
-          if grep -q "ndkVersion" "$GRADLE_FILE"; then
-            sed -i 's/ndkVersion = .*/ndkVersion = "27.0.12077973"/' "$GRADLE_FILE"
-          else
-            sed -i '/android {/a\    ndkVersion = "27.0.12077973"' "$GRADLE_FILE"
-          fi
-          echo "NDK version set:"
-          grep "ndkVersion" "$GRADLE_FILE" || echo "(not found in .kts, trying .gradle)"
-          GRADLE_FILE2="android/app/build.gradle"
-          if [ -f "$GRADLE_FILE2" ]; then
-            if grep -q "ndkVersion" "$GRADLE_FILE2"; then
-              sed -i 's/ndkVersion .*/ndkVersion "27.0.12077973"/' "$GRADLE_FILE2"
+          flutter create --platforms=android .
+          echo "Android folder regenerated"
+
+      # ── 2. Set NDK version required by flutterwave_standard ───────────────
+      - name: Set NDK version
+        script: |
+          # Try build.gradle.kts first (newer projects), then build.gradle
+          GRADLE_KTS="android/app/build.gradle.kts"
+          GRADLE="android/app/build.gradle"
+
+          if [ -f "$GRADLE_KTS" ]; then
+            if grep -q "ndkVersion" "$GRADLE_KTS"; then
+              sed -i 's/ndkVersion = .*/ndkVersion = "27.0.12077973"/' "$GRADLE_KTS"
             else
-              sed -i '/android {/a\    ndkVersion "27.0.12077973"' "$GRADLE_FILE2"
+              sed -i '/android {/a\    ndkVersion = "27.0.12077973"' "$GRADLE_KTS"
             fi
-            grep "ndkVersion" "$GRADLE_FILE2" || true
+            echo "NDK set in $GRADLE_KTS:"
+            grep "ndkVersion" "$GRADLE_KTS"
           fi
 
+          if [ -f "$GRADLE" ]; then
+            if grep -q "ndkVersion" "$GRADLE"; then
+              sed -i 's/ndkVersion .*/ndkVersion "27.0.12077973"/' "$GRADLE"
+            else
+              sed -i '/android {/a\    ndkVersion "27.0.12077973"' "$GRADLE"
+            fi
+            echo "NDK set in $GRADLE:"
+            grep "ndkVersion" "$GRADLE"
+          fi
+
+      # ── 3. Install dependencies ────────────────────────────────────────────
       - name: flutter pub get
         script: flutter pub get
 
+      # ── 4. Run tests ───────────────────────────────────────────────────────
       - name: Run tests
         script: flutter test || true
 
+      # ── 5. Build debug APK ─────────────────────────────────────────────────
       - name: Build debug APK
         script: |
           flutter build apk --debug \
@@ -80,8 +94,7 @@ workflows:
           failure: true
 
 
-  # ── PRODUCTION — release APK + AAB, requires signing ────────────────────────
-  # Uncomment when ready to release.
+  # ── PRODUCTION — uncomment when ready ───────────────────────────────────────
   #
   # rider-android-release:
   #   name: Rider App — Release (Production)
@@ -93,26 +106,27 @@ workflows:
   #     java: 17
   #     groups:
   #       - rydecircle_shared
-  #       - rydecircle_flutterwave   # use FLWPUBK_LIVE-xxx for production
+  #       - rydecircle_flutterwave   # switch to FLWPUBK_LIVE-xxx
   #       - rydecircle_rider_signing # CM_KEYSTORE, CM_KEYSTORE_PASSWORD,
   #                                  # CM_KEY_ALIAS, CM_KEY_PASSWORD
   #
   #   triggering:
   #     events: [push, tag]
   #     branch_patterns:
-  #       - { pattern: main,        include: true }
-  #       - { pattern: 'release/*', include: true }
+  #       - { pattern: main,         include: true }
+  #       - { pattern: 'release/*',  include: true }
   #     cancel_previous_builds: true
   #
   #   scripts:
+  #     - name: Regenerate Android project
+  #       script: flutter create --platforms=android .
+  #
   #     - name: Set NDK version
   #       script: |
-  #         GRADLE_FILE="android/app/build.gradle.kts"
-  #         if grep -q "ndkVersion" "$GRADLE_FILE"; then
-  #           sed -i 's/ndkVersion = .*/ndkVersion = "27.0.12077973"/' "$GRADLE_FILE"
-  #         else
-  #           sed -i '/android {/a\    ndkVersion = "27.0.12077973"' "$GRADLE_FILE"
-  #         fi
+  #         GRADLE="android/app/build.gradle.kts"
+  #         [ -f "$GRADLE" ] && sed -i '/android {/a\    ndkVersion = "27.0.12077973"' "$GRADLE"
+  #         GRADLE2="android/app/build.gradle"
+  #         [ -f "$GRADLE2" ] && sed -i '/android {/a\    ndkVersion "27.0.12077973"' "$GRADLE2"
   #
   #     - name: Set up Android signing
   #       script: |
@@ -157,6 +171,3 @@ workflows:
   #     email:
   #       recipients: [dev@rydecircle.com]
   #       notify: { success: true, failure: true }
-  #     # google_play:
-  #     #   credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
-  #     #   track: internal

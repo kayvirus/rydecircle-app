@@ -36,7 +36,8 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:flutter_paystack_plus/flutter_paystack_plus.dart';
+import 'package:flutterwave_standard/flutterwave.dart';
+import 'package:uuid/uuid.dart';
 import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
 import 'package:gap/gap.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -49,13 +50,15 @@ import 'package:shimmer/shimmer.dart';
 import 'package:timeline_tile/timeline_tile.dart';
 
 
+// ─── Flutterwave transaction ref generator ────────────────────────────────────
+const _uuid = Uuid();
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
   ));
-  // Pass --dart-define=PAYSTACK_PUBLIC_KEY=pk_test_xxx at build time
   runApp(const RydeCircleApp());
 }
 
@@ -63,7 +66,10 @@ void main() async {
 class AppConfig {
   static const apiBase = String.fromEnvironment(
       'API_BASE_URL', defaultValue: 'https://rydecircle-api.onrender.com');
-  static const paystackKey = String.fromEnvironment('PAYSTACK_PUBLIC_KEY', defaultValue: '');
+  // Pass --dart-define=FLUTTERWAVE_PUBLIC_KEY=FLWPUBK_TEST-xxx at build time
+  static const flutterwaveKey = String.fromEnvironment('FLUTTERWAVE_PUBLIC_KEY', defaultValue: '');
+  // true = test mode (use FLWPUBK_TEST keys), false = live
+  static const bool isTestMode = bool.fromEnvironment('FLW_TEST_MODE', defaultValue: true);
 }
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -1522,106 +1528,158 @@ class _TripCard extends StatelessWidget {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// BOOKING PAGE  (Paystack)
+// BOOKING PAGE  (Flutterwave)
+//
+// Flow:
+//   1. Rider picks seat count
+//   2. Taps "Pay with Flutterwave"
+//   3. flutterwave_standard opens its modal (card / bank transfer / USSD)
+//   4. On success  → POST /bookings with txRef → BookingConfirmedPage
+//   5. On failure  → error shown inline, no booking created
+//
+// Build-time env vars required:
+//   --dart-define=FLUTTERWAVE_PUBLIC_KEY=FLWPUBK_TEST-xxx
+//   --dart-define=FLW_TEST_MODE=true   (omit or set false for production)
 // ═════════════════════════════════════════════════════════════════════════════
 
 class BookingPage extends StatefulWidget {
   const BookingPage({super.key, required this.trip, required this.session,
     required this.api, required this.onBooked});
-  final TripResult trip; final AuthSession session; final ApiService api; final VoidCallback onBooked;
+  final TripResult trip; final AuthSession session;
+  final ApiService api; final VoidCallback onBooked;
   @override State<BookingPage> createState() => _BookingPageState();
 }
+
 class _BookingPageState extends State<BookingPage> {
   int _seats = 1;
   bool _loading = false;
   String? _err;
 
   double get _total => widget.trip.fare * _seats;
-  int    get _kobo  => (_total * 100).round();
   int    get _max   => widget.trip.seatsLeft.clamp(1, 6);
 
-  String _ref() {
-    final ts  = DateTime.now().millisecondsSinceEpoch;
-    final tid = widget.trip.id.replaceAll('-', '').substring(0, 8);
-    final uid = widget.session.user.id.replaceAll('-', '').substring(0, 8);
-    return 'RC-$tid-$uid-$ts';
-  }
+  // Unique ref for this checkout attempt — Flutterwave requires a unique txRef
+  String _txRef() => 'RC-${_uuid.v4().replaceAll('-', '').substring(0, 16)}';
 
   Future<void> _pay() async {
-    if (AppConfig.paystackKey.isEmpty) {
-      setState(() => _err = 'Paystack key not set. Add --dart-define=PAYSTACK_PUBLIC_KEY=pk_test_xxx to your build.');
+    if (AppConfig.flutterwaveKey.isEmpty) {
+      setState(() => _err =
+          'Flutterwave key not set.\n'
+          'Add --dart-define=FLUTTERWAVE_PUBLIC_KEY=FLWPUBK_TEST-xxx to your build.');
       return;
     }
+
     setState(() { _loading = true; _err = null; });
-    final ref = _ref();
+    final txRef = _txRef();
+
     try {
-      await FlutterPaystackPlus.openPaystackPopup(
-        context:       context,
-        secretKey:     AppConfig.paystackKey,   // use pk_test_xxx for testing
-        customerEmail: widget.session.user.email,
-        reference:     ref,
-        amount:        _kobo.toString(),          // in kobo
-        currency:      'NGN',
-        callBackUrl:   'https://rydecircle.com/payment-complete',
-        onSuccess: () async {
-          // Payment succeeded — create booking on backend
-          try {
-            final booking = await widget.api.createBooking(
-                tripId: widget.trip.id, seats: _seats, paymentRef: ref);
-            if (!mounted) return;
-            widget.onBooked();
-            Navigator.pop(context);
-            Navigator.push(context,
-                MaterialPageRoute(builder: (_) => BookingConfirmedPage(booking: booking)));
-          } catch (e) {
-            if (mounted) setState(() => _err = 'Booking failed after payment: \$e');
-          }
-        },
-        onClosed: () {
-          if (mounted) setState(() { _err = 'Payment was cancelled'; _loading = false; });
-        },
+      final customer = Customer(
+        name:        widget.session.user.fullName,
+        phoneNumber: widget.session.user.phone,
+        email:       widget.session.user.email,
       );
+
+      final flutterwave = Flutterwave(
+        publicKey:      AppConfig.flutterwaveKey,
+        currency:       'NGN',
+        amount:         _total.toStringAsFixed(2),  // Flutterwave takes a string
+        txRef:          txRef,
+        customer:       customer,
+        redirectUrl:    'https://rydecircle.com/payment-complete',
+        paymentOptions: 'card, banktransfer, ussd, account',
+        isTestMode:     AppConfig.isTestMode,
+        customization:  Customization(
+          title:       'RydeCircle Booking',
+          description: '${_seats} seat${_seats != 1 ? 's' : ''} — ${widget.trip.route ?? widget.trip.pickupStop}',
+          logo:        'https://rydecircle.com/logo.png',
+        ),
+      );
+
+      final response = await flutterwave.charge(context);
+
+      if (!mounted) return;
+
+      // response can be null if user presses back
+      if (response == null) {
+        setState(() { _err = 'Payment cancelled'; _loading = false; });
+        return;
+      }
+
+      if (response.success != true) {
+        setState(() {
+          _err = response.status ?? 'Payment was not completed';
+          _loading = false;
+        });
+        return;
+      }
+
+      // ── Payment succeeded — create booking on backend ────────────────────
+      // IMPORTANT: always verify server-side using response.transactionId
+      // before giving value. Pass txRef so your backend can verify with
+      // Flutterwave's verify-transaction endpoint.
+      try {
+        final booking = await widget.api.createBooking(
+          tripId:     widget.trip.id,
+          seats:      _seats,
+          paymentRef: txRef,
+        );
+        if (!mounted) return;
+        widget.onBooked();
+        Navigator.pop(context);
+        Navigator.push(context,
+            MaterialPageRoute(builder: (_) => BookingConfirmedPage(booking: booking)));
+      } catch (e) {
+        if (mounted) setState(() => _err = 'Payment received but booking failed — contact support. Ref: $txRef');
+      }
     } catch (e) {
-      if (mounted) setState(() => _err = '\$e');
-    } finally { if (mounted) setState(() => _loading = false); }
+      if (mounted) setState(() => _err = e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   @override
   Widget build(BuildContext ctx) => Scaffold(
     appBar: AppBar(title: Text('Book Trip', style: _h(16))),
     body: ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 32), children: [
-      // Trip summary
-      Container(padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(color: _kCard, borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: _kBrand.withOpacity(0.3))),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(widget.trip.route?.isNotEmpty == true
-                ? widget.trip.route!
-                : '${widget.trip.pickupStop} → ${widget.trip.dropoffStop}',
-                style: _t(16, w: FontWeight.w700)),
-            const Gap(12),
-            Row(children: [
-              _il(Icons.access_time_rounded, widget.trip.departureTime),
-              const Gap(14), _il(Icons.calendar_today_outlined, widget.trip.departureDate),
-              const Spacer(),
-              Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                Text(fmt(widget.trip.fare), style: _h(18, w: FontWeight.w700, c: _kBrand)),
-                Text('per seat', style: _t(10, c: _kTxtMuted)),
-              ]),
+
+      // ── Trip summary ──────────────────────────────────────────────────────
+      Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(color: _kCard, borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: _kBrand.withOpacity(0.3))),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(widget.trip.route?.isNotEmpty == true
+              ? widget.trip.route!
+              : '${widget.trip.pickupStop} → ${widget.trip.dropoffStop}',
+              style: _t(16, w: FontWeight.w700)),
+          const Gap(12),
+          Row(children: [
+            _il(Icons.access_time_rounded, widget.trip.departureTime),
+            const Gap(14), _il(Icons.calendar_today_outlined, widget.trip.departureDate),
+            const Spacer(),
+            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Text(fmt(widget.trip.fare), style: _h(18, w: FontWeight.w700, c: _kBrand)),
+              Text('per seat', style: _t(10, c: _kTxtMuted)),
             ]),
-            if ((widget.trip.driverName ?? '').isNotEmpty) ...[
-              const Gap(10), const Divider(color: _kBorder, height: 1), const Gap(10),
-              Row(children: [
-                const Icon(Icons.person_outline_rounded, size: 13, color: _kTxtMuted), const Gap(6),
-                Text(widget.trip.driverName!, style: _t(13, c: _kTxtSub)),
-                if ((widget.trip.plateNumber ?? '').isNotEmpty) ...[
-                  const Gap(12), const Icon(Icons.directions_car_outlined, size: 13, color: _kTxtMuted),
-                  const Gap(4), Text(widget.trip.plateNumber!, style: _t(13, c: _kTxtSub)),
-                ],
-              ]),
-            ],
-          ])),
+          ]),
+          if ((widget.trip.driverName ?? '').isNotEmpty) ...[
+            const Gap(10), const Divider(color: _kBorder, height: 1), const Gap(10),
+            Row(children: [
+              const Icon(Icons.person_outline_rounded, size: 13, color: _kTxtMuted), const Gap(6),
+              Text(widget.trip.driverName!, style: _t(13, c: _kTxtSub)),
+              if ((widget.trip.plateNumber ?? '').isNotEmpty) ...[
+                const Gap(12), const Icon(Icons.directions_car_outlined, size: 13, color: _kTxtMuted),
+                const Gap(4), Text(widget.trip.plateNumber!, style: _t(13, c: _kTxtSub)),
+              ],
+            ]),
+          ],
+        ]),
+      ),
+
       const Gap(20),
+
+      // ── Seat picker ───────────────────────────────────────────────────────
       _secLabel('Number of Seats'),
       Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -1642,8 +1700,10 @@ class _BookingPageState extends State<BookingPage> {
               padding: EdgeInsets.zero, constraints: const BoxConstraints()),
         ]),
       ),
+
       const Gap(20),
-      // Total banner
+
+      // ── Total banner ──────────────────────────────────────────────────────
       Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
         decoration: BoxDecoration(gradient: _kBrandGrad, borderRadius: BorderRadius.circular(16),
@@ -1660,49 +1720,82 @@ class _BookingPageState extends State<BookingPage> {
           ]),
         ]),
       ),
+
       const Gap(14),
-      // Paystack badge
-      Container(padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(color: _kCard, borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: _kBrand.withOpacity(0.25))),
-          child: Row(children: [
-            Container(width: 40, height: 40,
-                decoration: BoxDecoration(gradient: _kBrandGrad, borderRadius: BorderRadius.circular(10),
-                    boxShadow: [BoxShadow(color: _kBrand.withOpacity(0.3), blurRadius: 8)]),
-                child: const Icon(Icons.credit_card_rounded, color: Colors.white, size: 20)),
-            const Gap(12),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Pay securely with Paystack', style: _t(14, w: FontWeight.w600)),
-              Text('Card · Bank transfer · USSD · QR code', style: _t(12, c: _kTxtMuted)),
-            ])),
-            const Icon(Icons.verified_rounded, color: _kGreen, size: 18),
+
+      // ── Flutterwave badge ─────────────────────────────────────────────────
+      Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: _kCard, borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _kBrand.withOpacity(0.25))),
+        child: Row(children: [
+          Container(width: 40, height: 40,
+              decoration: BoxDecoration(gradient: _kBrandGrad, borderRadius: BorderRadius.circular(10),
+                  boxShadow: [BoxShadow(color: _kBrand.withOpacity(0.3), blurRadius: 8)]),
+              child: const Icon(Icons.credit_card_rounded, color: Colors.white, size: 20)),
+          const Gap(12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Pay securely with Flutterwave', style: _t(14, w: FontWeight.w600)),
+            Text('Card · Bank transfer · USSD', style: _t(12, c: _kTxtMuted)),
           ])),
-      if (_err != null) ...[const Gap(12),
-        Container(padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: _kRed.withOpacity(0.08), borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: _kRed.withOpacity(0.25))),
-            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Icon(Icons.error_outline, color: _kRed, size: 15), const Gap(8),
-              Expanded(child: Text(_err!, style: _t(13, c: _kRed))),
-            ])).animate().shake(hz: 4)],
+          const Icon(Icons.verified_rounded, color: _kGreen, size: 18),
+        ]),
+      ),
+
+      // ── Test mode notice ──────────────────────────────────────────────────
+      if (AppConfig.isTestMode) ...[
+        const Gap(8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(color: _kAmber.withOpacity(0.08), borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: _kAmber.withOpacity(0.3))),
+          child: Row(children: [
+            const Icon(Icons.science_outlined, color: _kAmber, size: 14), const Gap(6),
+            Text('Test mode — use Flutterwave test card details', style: _t(12, c: _kAmber)),
+          ]),
+        ),
+      ],
+
+      // ── Error ─────────────────────────────────────────────────────────────
+      if (_err != null) ...[
+        const Gap(12),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(color: _kRed.withOpacity(0.08), borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _kRed.withOpacity(0.25))),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.error_outline, color: _kRed, size: 15), const Gap(8),
+            Expanded(child: Text(_err!, style: _t(13, c: _kRed))),
+          ]),
+        ).animate().shake(hz: 4),
+      ],
+
       const Gap(20),
+
+      // ── Pay button ────────────────────────────────────────────────────────
       SizedBox(width: double.infinity, child: FilledButton(
         onPressed: _loading ? null : _pay,
-        style: FilledButton.styleFrom(minimumSize: const Size(double.infinity, 56),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-        child: _loading ? const _Spinner()
+        style: FilledButton.styleFrom(
+          minimumSize: const Size(double.infinity, 56),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        ),
+        child: _loading
+            ? const _Spinner()
             : Row(mainAxisSize: MainAxisSize.min, children: [
                 const Icon(Icons.lock_rounded, size: 15, color: Colors.white), const Gap(8),
-                Text('Pay ${fmt(_total)} with Paystack', style: _t(16, w: FontWeight.w700, c: Colors.white)),
+                Text('Pay ${fmt(_total)} with Flutterwave',
+                    style: _t(16, w: FontWeight.w700, c: Colors.white)),
               ]),
       )),
+
       const Gap(8),
       Center(child: Row(mainAxisSize: MainAxisSize.min, children: [
         const Icon(Icons.security_rounded, size: 12, color: _kTxtMuted), const Gap(5),
-        Text('Payments encrypted and secured by Paystack', style: _t(11, c: _kTxtMuted)),
+        Text('Payments secured by Flutterwave', style: _t(11, c: _kTxtMuted)),
       ])),
     ]),
   );
+
   Widget _il(IconData ic, String v) => Row(mainAxisSize: MainAxisSize.min, children: [
     Icon(ic, size: 12, color: _kTxtMuted), const Gap(4), Text(v, style: _t(12, c: _kTxtMuted))]);
 }

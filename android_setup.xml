@@ -1,0 +1,101 @@
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ANDROID SETUP REFERENCE — RydeCircle Rider App
+     Two files to edit before your first build.
+     ═══════════════════════════════════════════════════════════════════════════ -->
+
+
+<!-- ── FILE 1: android/app/src/main/AndroidManifest.xml ─────────────────────
+     Add these <uses-permission> lines inside <manifest>, before <application>
+     ──────────────────────────────────────────────────────────────────────── -->
+
+    <!-- Internet (required for API calls and Paystack) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Camera — for taking profile photo and NIN document photo -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- Read storage — Android 12 and below -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- Read images — Android 13+ -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+
+
+<!-- ── FILE 2: android/app/build.gradle ─────────────────────────────────────
+     Full replacement for the android { } block in your app-level build.gradle
+     ──────────────────────────────────────────────────────────────────────── -->
+
+/*
+
+def keystoreProps = new Properties()
+def keystoreFile  = rootProject.file('key.properties')
+if (keystoreFile.exists()) {
+    keystoreProps.load(new FileInputStream(keystoreFile))
+}
+
+android {
+    compileSdkVersion 34
+    ndkVersion flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    defaultConfig {
+        applicationId  "com.rydecircle.rider"
+        minSdkVersion  21          // flutter_paystack minimum
+        targetSdkVersion 34
+        versionCode    flutterVersionCode.toInteger()
+        versionName    flutterVersionName
+        multiDexEnabled true       // needed for image_picker on older devices
+    }
+
+    signingConfigs {
+        release {
+            keyAlias      keystoreProps['keyAlias']
+            keyPassword   keystoreProps['keyPassword']
+            storeFile     keystoreProps['storeFile'] ? file(keystoreProps['storeFile']) : null
+            storePassword keystoreProps['storePassword']
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig   signingConfigs.release
+            minifyEnabled   true
+            shrinkResources true
+            proguardFiles   getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            signingConfig   signingConfigs.debug
+        }
+    }
+}
+
+*/
+
+
+<!-- ── HOW TO GENERATE YOUR KEYSTORE ─────────────────────────────────────────
+     Run this once locally, then base64-encode the .jks for Codemagic.
+
+     keytool -genkeypair \
+       -alias rydecircle_rider \
+       -keyalg RSA -keysize 2048 \
+       -validity 10000 \
+       -keystore rydecircle_rider.jks \
+       -dname "CN=RydeCircle, OU=Mobile, O=RydeCircle Ltd, L=Lagos, ST=Lagos, C=NG"
+
+     Then base64-encode it:
+       macOS:   base64 -i rydecircle_rider.jks | pbcopy
+       Linux:   base64 rydecircle_rider.jks | xclip -selection clipboard
+
+     Paste the output as the CM_KEYSTORE environment variable in Codemagic.
+     ──────────────────────────────────────────────────────────────────────── -->

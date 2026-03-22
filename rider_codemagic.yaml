@@ -18,7 +18,7 @@ workflows:
   rider-android-debug:
     name: Rider App — Debug APK (Testing)
     max_build_duration: 30
-    instance_type: linux_x2      # cheapest instance, no macOS needed for Android
+    instance_type: mac_mini_m2      # cheapest instance, no macOS needed for Android
 
     environment:
       flutter: stable

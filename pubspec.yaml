@@ -27,14 +27,17 @@ dependencies:
   timeline_tile: ^2.0.0
   percent_indicator: ^4.2.3
 
-  # Image picking — camera + gallery (Android only, no iOS native setup needed)
+  # Image picking — camera + gallery
   image_picker: ^1.1.2
 
-  # Display remote images with in-memory caching
+  # Display remote images with caching
   cached_network_image: ^3.3.1
 
-  # Paystack inline checkout
-  flutter_paystack_plus: ^3.0.0
+  # Flutterwave payment (official package, pin the exact version)
+  flutterwave_standard: 1.1.0
+
+  # Unique transaction ref generation
+  uuid: ^4.4.0
 
   # Date formatting
   intl: ^0.19.0
